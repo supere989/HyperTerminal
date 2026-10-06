@@ -84,7 +84,7 @@ def main():
     legacy = subprocess.run(['tmux','-L','quake-agents','list-sessions'],capture_output=True) if shutil.which('tmux') else None
     if legacy and legacy.returncode == 0 and not os.environ.get('HYPERTERMINAL_TMUX_SOCKET'):
         for path,(data,mode) in list(files.items()):
-            if path.parent == bindir:
+            if path.parent == bindir and data.startswith(b'#!'):
                 data = data.replace(b':-hyperterminal}',b':-quake-agents}')
                 data = data.replace(b'#{@hyperterminal_agent}',b'#{@quake_agent}').replace(b'@hyperterminal_agent',b'@quake_agent').replace(b'@hyperterminal_created',b'@quake_created')
                 files[path] = (data,mode)

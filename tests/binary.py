@@ -45,6 +45,10 @@ with tempfile.TemporaryDirectory(prefix='hyperterminal-binary-') as temp:
     for name in required:
         target=shutil.which(name) or shutil.which('true')
         (tools/name).symlink_to(target)
+    # Simulate an existing legacy tmux backend: only scripts may be rewritten.
+    (tools/'tmux').unlink()
+    (tools/'tmux').write_text('#!/usr/bin/env bash\nif [[ "$*" == "-L quake-agents list-sessions" ]]; then exit 0; fi\nexec /usr/bin/tmux "$@"\n')
+    (tools/'tmux').chmod(0o755)
     for name in ['yakuake','konsole','qdbus-qt6']:
         (tools/name).symlink_to(shutil.which('true'))
     sudo=tools/'sudo';sudo.write_text('#!/usr/bin/env bash\nexec "$@"\n');sudo.chmod(0o755)

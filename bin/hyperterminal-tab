@@ -20,8 +20,8 @@ classify_process_tree() {
                 for (i=1; i<=NR; i++) if (marked[parent[pid[i]]]) marked[pid[i]]=1
             }
             priority[1]="codex"; priority[2]="claude"; priority[3]="grok";
-            priority[4]="kimi"; priority[5]="agy"
-            for (p=1; p<=5; p++) {
+            priority[4]="kimi"; priority[5]="agy"; priority[6]="opencode"
+            for (p=1; p<=6; p++) {
                 for (i=1; i<=NR; i++) {
                     if (marked[pid[i]] && tolower(command[pid[i]]) ~ ("^" priority[p])) {
                         print priority[p]; exit
@@ -33,13 +33,18 @@ classify_process_tree() {
 }
 
 emit_new_rows() {
-    printf '%s\t%s\n' \
-        'new|codex'  '＋  Codex       POWER · movable · reboot-restored' \
-        'new|claude' '＋  Claude      POWER · movable · reboot-restored' \
-        'new|grok'   '＋  Grok        POWER · movable · reboot-restored' \
-        'new|kimi'   '＋  Kimi        POWER · movable · reboot-restored' \
-        'new|agy'    '＋  Agy         POWER · movable · reboot-restored' \
-        'new|shell'  '＋  Fish shell  new movable terminal session'
+    "$HOME/.local/bin/hyperterminal-catalog" rows
+    printf '%s\t%s\n' 'new|shell' '＋  Fish shell  new movable terminal session'
+}
+
+emit_saved_rows() {
+    local name agent directory conversation availability
+    while IFS=$'\t' read -r name agent directory conversation; do
+        [[ -n "$name" ]] || continue
+        availability=""
+        "$HOME/.local/bin/hyperterminal-catalog" resolve "$agent" >/dev/null || [[ "$agent" == shell ]] || availability=" (not installed)"
+        printf 'saved|%s\t↻  %-18s %-10s saved HyperTerminal session · %s\n' "$name" "$name" "$agent$availability" "$directory"
+    done < <("$SESSION_TOOL" list-saved)
 }
 
 emit_managed_rows() {
@@ -87,6 +92,8 @@ emit_external_rows() {
 emit_rows() {
     emit_new_rows
     emit_managed_rows
+    emit_saved_rows
+    "$HOME/.local/bin/hyperterminal-catalog" history-rows
     emit_external_rows
     printf '%s\t%s\n' 'local-shell' '•  Unmanaged fish shell in this tab'
 }
@@ -98,6 +105,21 @@ perform_choice() {
     case "$kind" in
         new)
             name="$("$SESSION_TOOL" create "$value" "$PWD")"
+            "$SESSION_TOOL" attach "$name" || true
+            ;;
+        latest|picker)
+            name="$("$SESSION_TOOL" create "$value" "$PWD" "$kind")" || return
+            "$SESSION_TOOL" attach "$name" || true
+            ;;
+        history)
+            local directory
+            directory="$(printf '%s' "$window_id" | base64 -d)" || return
+            [[ -d "$directory" ]] || { printf 'Saved project directory is unavailable: %s\n' "$directory" >&2; return 1; }
+            name="$("$SESSION_TOOL" resume-conversation "$value" "$service" "$directory")" || return
+            "$SESSION_TOOL" attach "$name" || true
+            ;;
+        saved)
+            name="$("$SESSION_TOOL" resume-saved "$value")" || return
             "$SESSION_TOOL" attach "$name" || true
             ;;
         managed)
@@ -139,5 +161,5 @@ while true; do
         --header='ENTER: open or move  •  ESC: local shell  •  managed session: Ctrl-b o pops out')" || {
             exec /usr/bin/fish -l
         }
-    perform_choice "${selection%%$'\t'*}"
+    perform_choice "${selection%%$'\t'*}" || true
 done

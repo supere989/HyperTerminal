@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Detect installed coding agents and read local conversation metadata."""
+import argparse
+import base64
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+from urllib.parse import unquote
+
+# Explicit adapters avoid guessing a binary's arguments or executing shell config.
+AGENTS = {
+ 'codex': ('Codex', ['--dangerously-bypass-approvals-and-sandbox'], ['resume','--last'], ['resume','--all'], ['resume']),
+ 'claude': ('Claude', ['--dangerously-skip-permissions'], ['--continue'], ['--resume'], ['--resume']),
+ 'grok': ('Grok', ['--always-approve'], ['--continue'], None, ['--resume']),
+ 'kimi': ('Kimi', ['--auto'], ['--continue'], ['--session'], ['--session']),
+ 'agy': ('Agy', ['--dangerously-skip-permissions'], ['--continue'], None, ['--conversation']),
+ 'opencode': ('OpenCode', ['--auto'], ['--continue'], None, ['--session']),
+}
+ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$')
+SEARCH_DIRS = ['.local/bin','.grok/bin','.kimi-code/bin','.opencode/bin','.npm-global/bin','.cargo/bin']
+
+def resolve(agent):
+    if agent not in AGENTS: return None
+    found = shutil.which(agent)
+    if found: return str(Path(found).absolute())
+    for directory in SEARCH_DIRS:
+        candidate = Path.home()/directory/agent
+        if candidate.is_file() and os.access(candidate,os.X_OK): return str(candidate)
+    return None
+
+def command(agent, mode='new', conversation=''):
+    path = resolve(agent)
+    if not path: raise ValueError(f'{agent} is not installed; saved sessions remain available')
+    _,power,latest,picker,exact = AGENTS[agent]
+    if mode == 'new': suffix = []
+    elif mode == 'latest': suffix = latest
+    elif mode == 'picker':
+        if picker is None: raise ValueError(f'{agent} has no configured native history picker')
+        suffix = picker
+    elif mode == 'id':
+        if not ID.fullmatch(conversation): raise ValueError('Invalid conversation ID')
+        suffix = exact+[conversation]
+    else: raise ValueError('Invalid launch mode')
+    return [path]+power+suffix
+
+def clean(value):
+    return ''.join(c if c.isprintable() and c not in '\t\r\n' else ' ' for c in str(value))[:160]
+
+def read_json(path):
+    if path.stat().st_size > 2_000_000: raise ValueError('Oversized metadata')
+    return json.loads(path.read_text())
+
+def history(agent, limit=20):
+    home = Path.home()
+    rows = []
+    def add(cid,cwd,title='',updated=0):
+        if isinstance(cid,str) and ID.fullmatch(cid) and isinstance(cwd,str) and cwd:
+            # Missing directories stay in history, but must not launch in an unrelated project.
+            rows.append({'agent':agent,'id':cid,'directory':cwd,'title':clean(title or cid),'updated':updated})
+    try:
+        if agent == 'codex':
+            codex_home=Path(os.environ.get('CODEX_HOME',home/'.codex'))
+            names={}
+            index=codex_home/'session_index.jsonl'
+            if index.exists() and index.stat().st_size < 10_000_000:
+                with index.open() as stream:
+                    for line in stream:
+                        try:
+                            entry=json.loads(line)
+                            if entry.get('id'): names[entry['id']]=entry.get('thread_name','')
+                        except ValueError: continue
+            paths = (codex_home/'sessions').rglob('*.jsonl')
+            for p in sorted(paths,key=lambda p:p.stat().st_mtime,reverse=True)[:limit*5]:
+                try:
+                    with p.open() as f: first = f.readline(131072)
+                    event = json.loads(first)
+                    if event.get('type') != 'session_meta': continue
+                    data=event['payload']
+                    if data.get('source') in ('exec','subagent') or isinstance(data.get('source'),dict): continue
+                    cid=data.get('id',data.get('session_id'))
+                    add(cid,data.get('cwd'),names.get(cid,''),updated=p.stat().st_mtime)
+                except (OSError,ValueError,KeyError): continue
+        elif agent == 'claude':
+            paths=(Path(os.environ.get('CLAUDE_CONFIG_DIR',home/'.claude'))/'projects').glob('*/*.jsonl')
+            for p in sorted(paths,key=lambda p:p.stat().st_mtime,reverse=True)[:limit*5]:
+                try:
+                    with p.open() as f:
+                        for _ in range(40):
+                            line=f.readline(131072)
+                            if not line: break
+                            data=json.loads(line)
+                            if data.get('isSidechain'): break
+                            if data.get('cwd'):
+                                add(data.get('sessionId',p.stem),data['cwd'],updated=p.stat().st_mtime)
+                                break
+                except (OSError,ValueError): continue
+        elif agent == 'grok':
+            for p in (home/'.grok/sessions').glob('*/*'):
+                if p.is_dir(): add(p.name,unquote(p.parent.name),updated=p.stat().st_mtime)
+        elif agent == 'kimi':
+            for p in (home/'.kimi-code/sessions').glob('*/session_*/state.json'):
+                try:
+                    data=read_json(p)
+                    if not data.get('archived'): add(data.get('id'),data.get('cwd'),updated=p.stat().st_mtime)
+                except (OSError,ValueError): continue
+        elif agent == 'opencode':
+            result=subprocess.run([resolve(agent),'session','list','--max-count',str(limit),'--format','json'],capture_output=True,text=True,timeout=3)
+            if result.returncode == 0:
+                for data in json.loads(result.stdout):
+                    add(data.get('id'),data.get('directory'),data.get('title'),data.get('updated',0)/1000)
+    except (OSError,ValueError,subprocess.TimeoutExpired,TypeError): pass
+    unique={row['id']:row for row in rows}
+    return sorted(unique.values(),key=lambda row:row['updated'],reverse=True)[:limit]
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action',choices=['list','rows','history','history-rows','resolve','known','command'])
+    parser.add_argument('agent',nargs='?')
+    parser.add_argument('--mode',choices=['new','latest','picker','id'],default='new')
+    parser.add_argument('--id',default='')
+    parser.add_argument('--limit',type=int,default=20)
+    args=parser.parse_args()
+    if args.action == 'known': return 0 if args.agent in AGENTS or args.agent == 'shell' else 1
+    if args.action == 'resolve':
+        path=resolve(args.agent)
+        if not path: return 1
+        print(path)
+    elif args.action == 'command':
+        try: argv=command(args.agent,args.mode,args.id)
+        except ValueError as error: print(error,file=sys.stderr); return 1
+        sys.stdout.buffer.write(b'\0'.join(arg.encode() for arg in argv)+b'\0')
+    else:
+        installed=[agent for agent in AGENTS if resolve(agent)]
+        if args.action == 'list':
+            for agent in installed: print(f'{agent}\t{AGENTS[agent][0]}\t{resolve(agent)}')
+        elif args.action == 'rows':
+            for agent in installed:
+                label=AGENTS[agent][0]
+                print(f'new|{agent}\t＋  {label:<10} new session · POWER · persistent')
+                print(f'latest|{agent}\t↻  {label:<10} continue latest in this directory · persistent')
+                if AGENTS[agent][3]: print(f'picker|{agent}\t↻  {label:<10} choose previous conversation · persistent')
+        else:
+            rows=[]
+            for agent in installed:
+                if not args.agent or args.agent == agent: rows.extend(history(agent,max(1,min(args.limit,100))))
+            if args.action == 'history': print(json.dumps(rows))
+            else:
+                for row in rows:
+                    directory=base64.b64encode(row['directory'].encode()).decode()
+                    date=datetime.datetime.fromtimestamp(row['updated']).strftime('%Y-%m-%d %H:%M')
+                    print(f"history|{row['agent']}|{row['id']}|{directory}\t↶  {AGENTS[row['agent']][0]:<10} {date} · {row['title']} · {clean(row['directory'])}")
+    return 0
+
+if __name__ == '__main__': sys.exit(main())

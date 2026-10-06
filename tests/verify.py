@@ -10,7 +10,9 @@ import xml.etree.ElementTree as ET
 ROOT=Path(__file__).resolve().parents[1]
 def run(args,env=None,**kwargs):
     return subprocess.run(args,env=env,check=True,text=True,capture_output=True,**kwargs).stdout.strip()
-for p in (ROOT/'bin').iterdir(): run(['bash','-n',str(p)])
+for p in (ROOT/'bin').iterdir():
+    if p.read_text().startswith('#!/usr/bin/env bash'): run(['bash','-n',str(p)])
+    else: compile(p.read_text(),str(p),'exec')
 for p in (ROOT/'assets').rglob('*.svg'): ET.parse(p)
 with tempfile.TemporaryDirectory(prefix='hyperterminal-test-') as temp:
     home=Path(temp)

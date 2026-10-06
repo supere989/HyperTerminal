@@ -13,10 +13,15 @@ readonly TAB_QUEUE_LOCK="$STATE_ROOT/tab-restore.lock"
 readonly -a TMUX=(/usr/bin/tmux -L "$SOCKET_NAME" -f "$TMUX_CONFIG")
 
 valid_agent() {
-    case "$1" in
-        codex|claude|grok|kimi|agy|shell) return 0 ;;
-        *) return 1 ;;
-    esac
+    "$HOME/.local/bin/hyperterminal-catalog" known "$1"
+}
+
+agent_available() {
+    [[ "$1" == shell ]] || "$HOME/.local/bin/hyperterminal-catalog" resolve "$1" >/dev/null
+}
+
+valid_conversation() {
+    [[ -z "$1" || "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,159}$ ]]
 }
 
 valid_session_name() {
@@ -36,32 +41,40 @@ write_state() {
     local name="${1:?session required}"
     local agent="${2:?agent required}"
     local working_dir="${3:?working directory required}"
-    local encoded_dir temp_file
+    local encoded_dir temp_file line conversation="${4:-}"
+    # Preserve the identity of explicitly resumed conversations during snapshots.
+    if [[ $# -lt 4 && -f "$SESSION_STATE_DIR/$name.session" ]]; then
+        while IFS= read -r line; do
+            [[ "$line" == conversation_id=* ]] && conversation="${line#*=}"
+        done <"$SESSION_STATE_DIR/$name.session"
+    fi
+    valid_conversation "$conversation" || return 64
     valid_session_name "$name" && valid_agent "$agent" || return 64
     ensure_state_dir
     encoded_dir="$(printf '%s' "$working_dir" | base64 -w0)"
     temp_file="$(mktemp "$SESSION_STATE_DIR/.${name}.XXXXXX")"
     chmod 600 "$temp_file"
-    printf 'version=1\nagent=%s\ndirectory_b64=%s\n' \
-        "$agent" "$encoded_dir" >"$temp_file"
+    printf 'version=2\nagent=%s\ndirectory_b64=%s\nconversation_id=%s\n' \
+        "$agent" "$encoded_dir" "$conversation" >"$temp_file"
     mv -f -- "$temp_file" "$SESSION_STATE_DIR/$name.session"
 }
 
 read_state() {
     local file="${1:?state file required}"
-    local line key value agent="" encoded_dir="" working_dir
+    local line key value agent="" encoded_dir="" working_dir conversation=""
     while IFS= read -r line; do
         key="${line%%=*}"
         value="${line#*=}"
         case "$key" in
             agent) agent="$value" ;;
             directory_b64) encoded_dir="$value" ;;
+            conversation_id) conversation="$value" ;;
         esac
     done <"$file"
-    valid_agent "$agent" || return 1
+    valid_agent "$agent" && valid_conversation "$conversation" || return 1
     working_dir="$(printf '%s' "$encoded_dir" | base64 -d 2>/dev/null)" || return 1
-    [[ -d "$working_dir" ]] || working_dir="$HOME"
-    printf '%s\t%s\n' "$agent" "$working_dir"
+    if [[ -z "$conversation" && ! -d "$working_dir" ]]; then working_dir="$HOME"; fi
+    printf '%s\t%s\t%s\n' "$agent" "$working_dir" "${conversation:--}"
 }
 
 write_tab_queue() {
@@ -126,7 +139,7 @@ unique_name() {
     local base candidate suffix=1
     base="${agent}-$(date +%m%d-%H%M)"
     candidate="$base"
-    while session_exists "$candidate"; do
+    while session_exists "$candidate" || [[ -e "$SESSION_STATE_DIR/$candidate.session" ]]; do
         suffix=$((suffix + 1))
         candidate="${base}-${suffix}"
     done
@@ -138,31 +151,47 @@ create_named_session() {
     local agent="${2:?agent required}"
     local working_dir="${3:-$PWD}"
     local restore="${4:-0}"
+    local conversation="${5:-}"
     local command
     valid_session_name "$name" || return 64
     valid_agent "$agent" || {
         printf 'Unsupported managed agent: %s\n' "$agent" >&2
         return 64
     }
+    agent_available "$agent" || { printf 'Agent unavailable: %s; saved session retained.\n' "$agent" >&2; return 1; }
+    valid_conversation "$conversation" || return 64
+    if [[ -n "$conversation" && ! -d "$working_dir" ]]; then
+        printf 'Saved project directory unavailable: %s; session retained.\n' "$working_dir" >&2
+        return 1
+    fi
     [[ -d "$working_dir" ]] || working_dir="$HOME"
-    if [[ "$restore" == 1 ]]; then
+    if [[ -n "$conversation" ]]; then
+        printf -v command '%q --mode id %q %q' "$RUNNER" "$agent" "$conversation"
+    elif [[ "$restore" == latest || "$restore" == picker ]]; then
+        printf -v command '%q --mode %q %q' "$RUNNER" "$restore" "$agent"
+    elif [[ "$restore" == 1 ]]; then
         printf -v command '%q --restore %q' "$RUNNER" "$agent"
     else
         printf -v command '%q %q' "$RUNNER" "$agent"
     fi
-    "${TMUX[@]}" new-session -d -s "$name" -c "$working_dir" "$command"
+    "${TMUX[@]}" new-session -d -s "$name" -c "$working_dir" "$command" || return
     "${TMUX[@]}" set-option -q -t "$name" @hyperterminal_agent "$agent"
     "${TMUX[@]}" set-option -q -t "$name" @hyperterminal_created "$(date --iso-8601=seconds)"
     "${TMUX[@]}" source-file "$TMUX_CONFIG"
-    write_state "$name" "$agent" "$working_dir"
+    write_state "$name" "$agent" "$working_dir" "$conversation"
 }
 
 create_session() {
     local agent="${1:?agent required}"
     local working_dir="${2:-$PWD}"
-    local name
+    local mode="${3:-new}" conversation="${4:-}" name
+    case "$mode" in new|latest|picker|id) ;; *) return 64 ;; esac
+    [[ "$mode" != id || -n "$conversation" ]] || return 64
+    if [[ "$mode" == picker ]]; then
+        "$HOME/.local/bin/hyperterminal-catalog" command "$agent" --mode picker >/dev/null || return 1
+    fi
     name="$(unique_name "$agent")"
-    create_named_session "$name" "$agent" "$working_dir" 0
+    create_named_session "$name" "$agent" "$working_dir" "$mode" "$conversation" || return
     printf '%s\n' "$name"
 }
 
@@ -194,7 +223,7 @@ prepare_shutdown() {
 }
 
 restore_sessions() {
-    local file name agent working_dir restored=0
+    local file name agent working_dir conversation restored=0
     local -a state_files=()
     local -a restored_names=()
     ensure_state_dir
@@ -206,15 +235,26 @@ restore_sessions() {
         name="${name%.session}"
         valid_session_name "$name" || continue
         session_exists "$name" && continue
-        if IFS=$'\t' read -r agent working_dir < <(read_state "$file"); then
-            if create_named_session "$name" "$agent" "$working_dir" 1; then
+        if IFS=$'\t' read -r agent working_dir conversation < <(read_state "$file"); then
+            [[ "$conversation" == - ]] && conversation=""
+            if create_named_session "$name" "$agent" "$working_dir" 1 "$conversation"; then
                 restored=$((restored + 1))
                 restored_names+=("$name")
             fi
         fi
     done
     if (( restored > 0 )); then
-        write_tab_queue "${restored_names[@]}"
+        local queued
+        local -a pending=()
+        if [[ -f "$TAB_QUEUE" ]]; then
+            while IFS= read -r queued; do
+                valid_session_name "$queued" && session_exists "$queued" && pending+=("$queued")
+            done <"$TAB_QUEUE"
+        fi
+        for name in "${restored_names[@]}"; do
+            [[ " ${pending[*]} " == *" $name "* ]] || pending+=("$name")
+        done
+        write_tab_queue "${pending[@]}"
     fi
     [[ -e "$SHUTDOWN_MARKER" ]] && unlink "$SHUTDOWN_MARKER"
     printf 'restored=%s\n' "$restored"
@@ -276,9 +316,61 @@ list_sessions() {
         2>/dev/null || true)
 }
 
+list_saved_sessions() {
+    local file name agent directory conversation
+    shopt -s nullglob
+    for file in "$SESSION_STATE_DIR"/*.session; do
+        name="${file##*/}"; name="${name%.session}"
+        valid_session_name "$name" || continue
+        session_exists "$name" && continue
+        if IFS=$'\t' read -r agent directory conversation < <(read_state "$file"); then
+            printf '%s\t%s\t%s\t%s\n' "$name" "$agent" "$directory" "$conversation"
+        fi
+    done
+}
+
+resume_saved_session() {
+    local name="${1:?session required}" agent directory conversation
+    valid_session_name "$name" || return 64
+    if ! session_exists "$name"; then
+        [[ -f "$SESSION_STATE_DIR/$name.session" ]] || return 1
+        IFS=$'\t' read -r agent directory conversation < <(read_state "$SESSION_STATE_DIR/$name.session") || return 1
+        [[ "$conversation" == - ]] && conversation=""
+        create_named_session "$name" "$agent" "$directory" 1 "$conversation" || return
+    fi
+    printf '%s\n' "$name"
+}
+
+resume_conversation() {
+    local agent="${1:?agent required}" conversation="${2:?ID required}" directory="${3:-$PWD}"
+    local file name saved_agent saved_directory saved_id
+    valid_agent "$agent" && valid_conversation "$conversation" || return 64
+    # Reattach an already managed conversation instead of duplicating its process.
+    shopt -s nullglob
+    for file in "$SESSION_STATE_DIR"/*.session; do
+        if IFS=$'\t' read -r saved_agent saved_directory saved_id < <(read_state "$file"); then
+            if [[ "$saved_agent" == "$agent" && "$saved_id" == "$conversation" ]]; then
+                name="${file##*/}"; name="${name%.session}"
+                resume_saved_session "$name"
+                return
+            fi
+        fi
+    done
+    create_session "$agent" "$directory" id "$conversation"
+}
+
 case "${1:-}" in
     create)
-        create_session "${2:-}" "${3:-$PWD}"
+        create_session "${2:-}" "${3:-$PWD}" "${4:-new}" "${5:-}"
+        ;;
+    list-saved)
+        list_saved_sessions
+        ;;
+    resume-saved)
+        resume_saved_session "${2:-}"
+        ;;
+    resume-conversation)
+        resume_conversation "${2:-}" "${3:-}" "${4:-$PWD}"
         ;;
     new)
         name="$(create_session "${2:-}" "${3:-$PWD}")"
@@ -318,7 +410,7 @@ case "${1:-}" in
         list_sessions
         ;;
     *)
-        printf 'usage: %s {create|new|attach|popout|focus-external|forget|snapshot|prepare-shutdown|restore|queue-detached-tabs|claim-tab|queue-count|list} ...\n' "${0##*/}" >&2
+        printf 'usage: %s {create|list-saved|resume-saved|resume-conversation|new|attach|popout|focus-external|forget|snapshot|prepare-shutdown|restore|queue-detached-tabs|claim-tab|queue-count|list} ...\n' "${0##*/}" >&2
         exit 64
         ;;
 esac

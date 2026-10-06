@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- Add a single Rust executable embedding the installer, runtime, and theme assets.
+- Check dependencies before operational commands; show a read-only doctor report.
+- Ask permission before package-manager downloads and installation, defaulting to No.
+- Support Arch/Garuda, Debian/Ubuntu, and Fedora package mappings.
+- Handle terminal and KDE desktop confirmation and administrator authentication.
+- Recheck dependencies after installation and defer deployment on failure.
+- Atomically deploy files, including upgrades to the running executable, with backups.
+- Route binary-install menu/autostart entries through the dependency checker.
+- Handle distribution-specific Qt 6 qdbus names.
+
 ## 0.2.0
 
 - Detect installed coding agents on PATH and common user installation paths.

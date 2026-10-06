@@ -3,3 +3,5 @@ __pycache__/
 .session-state/
 *.session
 .env
+target/
+dist/

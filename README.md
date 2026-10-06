@@ -26,7 +26,59 @@ This initial release uses standard `~/.config`, `~/.local/share`, and
 `~/.local/bin` locations. Home paths containing spaces or shell metacharacters
 listed by the installer are currently unsupported.
 
-## Install
+## Single-executable distribution
+
+Download the Linux executable from [Releases](https://github.com/supere989/HyperTerminal/releases),
+make it executable, and run it:
+
+```bash
+chmod +x hyperterminal-linux-x86_64
+./hyperterminal-linux-x86_64 doctor
+./hyperterminal-linux-x86_64 install
+~/.local/bin/hyperterminal
+```
+
+The Rust executable embeds the Bash/Python runtime, installer, and theme assets.
+You do not need to clone the repository to use it. It is a single distribution
+file, while system dependencies and coding agent CLIs remain separate.
+The Linux x86_64 release binary is statically linked with musl, so the bootstrap
+does not require a particular glibc version. Runtime applications still use
+your distribution libraries. Other architectures require a source build.
+
+Every operational invocation checks dependencies before launching. If anything
+is missing, HyperTerminal detects the distribution, shows the missing tools
+and the exact package-manager command, and asks for explicit permission.
+The default answer is **No**. Downloads and installation use configured system
+repositories through pacman (Arch/Garuda), apt-get (Debian/Ubuntu), or dnf (Fedora).
+Administrator authentication uses sudo in a terminal or pkexec from a desktop.
+Desktop confirmation uses kdialog; if an interactive prompt cannot be shown,
+installation stops and directs you to run it in a terminal.
+
+Declining permission, authentication failure, installation failure, or missing
+tools after installation stops setup before embedded runtime deployment.
+There is no unattended approval flag and no downloaded shell script execution.
+Unsupported distributions get a list of dependencies to install manually.
+Package repository configuration remains the user's responsibility; the binary
+does not enable repositories or upgrade the operating system.
+
+`hyperterminal install` deploys into your user account with backups.
+On normal first launch or a bundle update, deployment also asks permission.
+Subsequent launches verify dependencies and use the deployed bundle.
+The desktop and autostart entries invoke the binary so these checks also apply
+when starting from the application menu. Existing session files and live tmux
+processes are preserved; Qt 6 qdbus executable naming differences are handled
+by a compatibility helper. The binary does not install or authenticate coding agents.
+
+```bash
+hyperterminal doctor            # read-only dependency report
+hyperterminal agents            # detected coding agents
+hyperterminal agents history    # local conversation metadata
+hyperterminal sessions list     # running managed sessions
+hyperterminal selector          # interactive agent/session selector
+hyperterminal clipboard         # save clipboard image and copy its path
+```
+
+## Install from source
 
 ```bash
 git clone https://github.com/supere989/HyperTerminal.git
@@ -123,8 +175,13 @@ Images are saved under `~/Pictures/HyperTerminal Clipboard/` (or `XDG_PICTURES_D
 ## Development
 
 ```bash
+cargo test
+cargo build --release
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
 python3 tests/verify.py
 python3 tests/detection.py
+python3 tests/binary.py
 ```
 
 Checks cover Bash syntax, asset parsing, isolated installer backup/restore,
@@ -133,7 +190,7 @@ and cleanup. Agent checks cover discovery, exact resume arguments, reattachment,
 missing-agent recovery, and legacy records. Desktop appearance and agent CLI compatibility require a real
 Plasma session with the relevant dependencies.
 
-Project layout: `bin/` launchers; `assets/` theme/profile; `config/` integration;
+Project layout: `src/` Rust bootstrap; `build.rs` embedded runtime bundle; `bin/` launchers; `assets/` theme/profile; `config/` integration;
 `desktop/` menu templates; `systemd/` persistence service.
 
 ## License and credits

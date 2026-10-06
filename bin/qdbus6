@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Qt 6 distributions use different executable names and locations.
+for candidate in /usr/bin/qdbus6 /usr/bin/qdbus-qt6 /usr/lib/qt6/bin/qdbus /usr/lib64/qt6/bin/qdbus; do
+    if [[ -x "$candidate" ]]; then exec "$candidate" "$@"; fi
+done
+printf 'HyperTerminal: Qt 6 qdbus is unavailable. Run hyperterminal install.\n' >&2
+exit 127

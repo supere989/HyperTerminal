@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parent
 
@@ -36,8 +37,9 @@ def main():
     for key, expected in [('XDG_CONFIG_HOME', config), ('XDG_DATA_HOME', share)]:
         if os.environ.get(key) and Path(os.environ[key]) != expected:
             parser.error(f'{key} must be unset or {expected}')
-    deps = ['bash','fish','tmux','fzf','yakuake','konsole','qdbus6','rg','wl-copy','wl-paste','flock','base64','ps']
-    missing = [name for name in deps if not shutil.which(name)]
+    deps = ['python3','bash','fish','tmux','fzf','yakuake','konsole','qdbus6','rg','wl-copy','wl-paste','flock','base64','ps']
+    qt_candidates = ['qdbus6', 'qdbus-qt6', '/usr/bin/qdbus6', '/usr/bin/qdbus-qt6', '/usr/lib/qt6/bin/qdbus', '/usr/lib64/qt6/bin/qdbus']
+    missing = [name for name in deps if not (any(shutil.which(candidate) for candidate in qt_candidates) if name == 'qdbus6' else shutil.which(name))]
     if missing and not args.no_activate and not args.dry_run:
         parser.error('Missing dependencies: '+', '.join(missing))
     if missing: print('Dependencies to install: '+', '.join(missing))
@@ -48,6 +50,9 @@ def main():
     if any(c in str(home) for c in ' "\'\\\n\r%'):
         parser.error('This release requires a home path without spaces, quotes, backslashes, or percent signs')
     for p in (ROOT/'bin').iterdir(): files[bindir/p.name] = (p.read_bytes(),0o755)
+    binary_source = os.environ.get('HYPERTERMINAL_BINARY_SOURCE')
+    if binary_source:
+        files[bindir/'hyperterminal'] = (Path(binary_source).read_bytes(), 0o755)
     files[bindir/'agents'] = (b'#!/usr/bin/env bash\nexec "$HOME/.local/bin/hyperterminal-agents" "$@"\n',0o755)
     for p in (ROOT/'assets/konsole').iterdir():
         if p.suffix == '.keytab': continue
@@ -71,6 +76,10 @@ def main():
     files[config/'autostart/org.kde.yakuake.desktop'] = (render(ROOT/'desktop/hyperterminal-autostart.desktop.in'),0o644)
     files[config/'systemd/user/hyperterminal-session-persistence.service'] = ((ROOT/'systemd/hyperterminal-session-persistence.service').read_bytes(),0o644)
     files[share/'hyperterminal/README.md'] = ((ROOT/'README.md').read_bytes(),0o644)
+    if binary_source:
+        for path, (data, mode) in list(files.items()):
+            if path.suffix == '.desktop':
+                files[path] = (data.replace(b'/hyperterminal-start', b'/hyperterminal'), mode)
     # Preserve existing running sessions while retiring the old socket name on fresh installs.
     legacy = subprocess.run(['tmux','-L','quake-agents','list-sessions'],capture_output=True) if shutil.which('tmux') else None
     if legacy and legacy.returncode == 0 and not os.environ.get('HYPERTERMINAL_TMUX_SOCKET'):
@@ -97,8 +106,16 @@ def main():
             shutil.copy2(path,saved)
         manifest.append({'path':str(relative),'existed':existed})
         path.parent.mkdir(parents=True,exist_ok=True)
-        path.write_bytes(data)
-        path.chmod(mode)
+        fd, temporary = tempfile.mkstemp(prefix='.'+path.name+'.', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+                os.fchmod(stream.fileno(), mode)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
     (backup/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     print(f'HyperTerminal installed. Backup: {backup}')
     if not args.no_activate:

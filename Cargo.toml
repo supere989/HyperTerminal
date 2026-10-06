@@ -1,0 +1,13 @@
+[package]
+name = "hyperterminal"
+version = "0.3.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "HyperTerminal dependency bootstrap and desktop session hub"
+repository = "https://github.com/supere989/HyperTerminal"
+build = "build.rs"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

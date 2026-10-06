@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+restore=0
+if [[ "${1:-}" == --restore ]]; then
+    restore=1
+    shift
+fi
+
+agent="${1:-shell}"
+
+case "$agent" in
+    codex|claude|grok|kimi|agy)
+        agent_path="$(command -v "$agent" 2>/dev/null || true)"
+        if [[ -z "$agent_path" ]]; then
+            printf '\n%s is not installed or is not on PATH.\n' "$agent" >&2
+            exec /usr/bin/fish -l
+        fi
+        command=("$agent_path")
+        case "$agent" in
+            codex)
+                command+=(--dangerously-bypass-approvals-and-sandbox)
+                (( restore )) && command+=(resume --last)
+                ;;
+            claude)
+                command+=(--dangerously-skip-permissions)
+                (( restore )) && command+=(--continue)
+                ;;
+            grok)
+                command+=(--always-approve)
+                (( restore )) && command+=(--continue)
+                ;;
+            kimi)
+                command+=(--auto)
+                (( restore )) && command+=(--continue)
+                ;;
+            agy)
+                command+=(--dangerously-skip-permissions)
+                (( restore )) && command+=(--continue)
+                ;;
+        esac
+        printf '\033]2;HyperTerminal: %s (power)\007' "$agent"
+        "${command[@]}"
+        exit_code=$?
+        printf '\n[%s exited with status %s — continuing in fish]\n\n' "$agent" "$exit_code"
+        exec /usr/bin/fish -l
+        ;;
+    shell)
+        printf '\033]2;HyperTerminal: shell\007'
+        exec /usr/bin/fish -l
+        ;;
+    *)
+        printf 'Unsupported managed agent: %s\n' "$agent" >&2
+        exit 64
+        ;;
+esac

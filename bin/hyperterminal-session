@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SOCKET_NAME="${HYPERTERMINAL_TMUX_SOCKET:-hyperterminal}"
+readonly TMUX_CONFIG="${HYPERTERMINAL_TMUX_CONFIG:-$HOME/.config/hyperterminal/tmux.conf}"
+readonly RUNNER="$HOME/.local/bin/hyperterminal-agent-runner"
+readonly SELF="$HOME/.local/bin/hyperterminal-session"
+readonly STATE_ROOT="${HYPERTERMINAL_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/hyperterminal}"
+readonly SESSION_STATE_DIR="$STATE_ROOT/sessions"
+readonly SHUTDOWN_MARKER="$STATE_ROOT/restore-on-login"
+readonly TAB_QUEUE="$STATE_ROOT/tab-restore.queue"
+readonly TAB_QUEUE_LOCK="$STATE_ROOT/tab-restore.lock"
+readonly -a TMUX=(/usr/bin/tmux -L "$SOCKET_NAME" -f "$TMUX_CONFIG")
+
+valid_agent() {
+    case "$1" in
+        codex|claude|grok|kimi|agy|shell) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_session_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]
+}
+
+session_exists() {
+    valid_session_name "$1" && "${TMUX[@]}" has-session -t "=$1" 2>/dev/null
+}
+
+ensure_state_dir() {
+    mkdir -p "$SESSION_STATE_DIR"
+    chmod 700 "$STATE_ROOT" "$SESSION_STATE_DIR"
+}
+
+write_state() {
+    local name="${1:?session required}"
+    local agent="${2:?agent required}"
+    local working_dir="${3:?working directory required}"
+    local encoded_dir temp_file
+    valid_session_name "$name" && valid_agent "$agent" || return 64
+    ensure_state_dir
+    encoded_dir="$(printf '%s' "$working_dir" | base64 -w0)"
+    temp_file="$(mktemp "$SESSION_STATE_DIR/.${name}.XXXXXX")"
+    chmod 600 "$temp_file"
+    printf 'version=1\nagent=%s\ndirectory_b64=%s\n' \
+        "$agent" "$encoded_dir" >"$temp_file"
+    mv -f -- "$temp_file" "$SESSION_STATE_DIR/$name.session"
+}
+
+read_state() {
+    local file="${1:?state file required}"
+    local line key value agent="" encoded_dir="" working_dir
+    while IFS= read -r line; do
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$key" in
+            agent) agent="$value" ;;
+            directory_b64) encoded_dir="$value" ;;
+        esac
+    done <"$file"
+    valid_agent "$agent" || return 1
+    working_dir="$(printf '%s' "$encoded_dir" | base64 -d 2>/dev/null)" || return 1
+    [[ -d "$working_dir" ]] || working_dir="$HOME"
+    printf '%s\t%s\n' "$agent" "$working_dir"
+}
+
+write_tab_queue() {
+    local temp_file name
+    ensure_state_dir
+    temp_file="$(mktemp "$STATE_ROOT/.tab-restore.XXXXXX")"
+    chmod 600 "$temp_file"
+    for name in "$@"; do
+        valid_session_name "$name" || continue
+        printf '%s\n' "$name" >>"$temp_file"
+    done
+    if [[ -s "$temp_file" ]]; then
+        mv -f -- "$temp_file" "$TAB_QUEUE"
+    else
+        unlink "$temp_file"
+        [[ -e "$TAB_QUEUE" ]] && unlink "$TAB_QUEUE"
+    fi
+    return 0
+}
+
+queue_detached_tabs() {
+    local name attached agent windows current
+    local -a names=()
+    while IFS=$'\t' read -r name attached agent windows current; do
+        [[ -n "$name" && "${attached:-0}" -eq 0 ]] || continue
+        names+=("$name")
+    done < <(list_sessions)
+    write_tab_queue "${names[@]}"
+    printf 'queued=%s\n' "${#names[@]}"
+}
+
+claim_tab() {
+    local name temp_file
+    ensure_state_dir
+    exec 9>"$TAB_QUEUE_LOCK"
+    flock 9
+    [[ -s "$TAB_QUEUE" ]] || return 1
+    IFS= read -r name <"$TAB_QUEUE"
+    valid_session_name "$name" || return 1
+    temp_file="$(mktemp "$STATE_ROOT/.tab-restore.XXXXXX")"
+    chmod 600 "$temp_file"
+    sed '1d' "$TAB_QUEUE" >"$temp_file"
+    if [[ -s "$temp_file" ]]; then
+        mv -f -- "$temp_file" "$TAB_QUEUE"
+    else
+        unlink "$temp_file"
+        unlink "$TAB_QUEUE"
+    fi
+    printf '%s\n' "$name"
+}
+
+tab_queue_count() {
+    if [[ -f "$TAB_QUEUE" ]]; then
+        wc -l <"$TAB_QUEUE"
+    else
+        printf '0\n'
+    fi
+}
+
+unique_name() {
+    local agent="$1"
+    local base candidate suffix=1
+    base="${agent}-$(date +%m%d-%H%M)"
+    candidate="$base"
+    while session_exists "$candidate"; do
+        suffix=$((suffix + 1))
+        candidate="${base}-${suffix}"
+    done
+    printf '%s\n' "$candidate"
+}
+
+create_named_session() {
+    local name="${1:?session required}"
+    local agent="${2:?agent required}"
+    local working_dir="${3:-$PWD}"
+    local restore="${4:-0}"
+    local command
+    valid_session_name "$name" || return 64
+    valid_agent "$agent" || {
+        printf 'Unsupported managed agent: %s\n' "$agent" >&2
+        return 64
+    }
+    [[ -d "$working_dir" ]] || working_dir="$HOME"
+    if [[ "$restore" == 1 ]]; then
+        printf -v command '%q --restore %q' "$RUNNER" "$agent"
+    else
+        printf -v command '%q %q' "$RUNNER" "$agent"
+    fi
+    "${TMUX[@]}" new-session -d -s "$name" -c "$working_dir" "$command"
+    "${TMUX[@]}" set-option -q -t "$name" @hyperterminal_agent "$agent"
+    "${TMUX[@]}" set-option -q -t "$name" @hyperterminal_created "$(date --iso-8601=seconds)"
+    "${TMUX[@]}" source-file "$TMUX_CONFIG"
+    write_state "$name" "$agent" "$working_dir"
+}
+
+create_session() {
+    local agent="${1:?agent required}"
+    local working_dir="${2:-$PWD}"
+    local name
+    name="$(unique_name "$agent")"
+    create_named_session "$name" "$agent" "$working_dir" 0
+    printf '%s\n' "$name"
+}
+
+forget_session() {
+    local name="${1:?session required}"
+    valid_session_name "$name" || return 64
+    [[ -e "$SHUTDOWN_MARKER" ]] && return 0
+    [[ -e "$SESSION_STATE_DIR/$name.session" ]] || return 0
+    unlink "$SESSION_STATE_DIR/$name.session"
+}
+
+snapshot_sessions() {
+    local name attached agent windows current working_dir
+    ensure_state_dir
+    while IFS=$'\t' read -r name attached agent windows current; do
+        [[ -n "$name" ]] || continue
+        valid_agent "$agent" || continue
+        working_dir="$("${TMUX[@]}" display-message -p -t "$name" '#{pane_current_path}' 2>/dev/null || true)"
+        [[ -d "$working_dir" ]] || working_dir="$HOME"
+        write_state "$name" "$agent" "$working_dir"
+    done < <(list_sessions)
+}
+
+prepare_shutdown() {
+    ensure_state_dir
+    : >"$SHUTDOWN_MARKER"
+    chmod 600 "$SHUTDOWN_MARKER"
+    snapshot_sessions
+}
+
+restore_sessions() {
+    local file name agent working_dir restored=0
+    local -a state_files=()
+    local -a restored_names=()
+    ensure_state_dir
+    shopt -s nullglob
+    state_files=("$SESSION_STATE_DIR"/*.session)
+    shopt -u nullglob
+    for file in "${state_files[@]}"; do
+        name="${file##*/}"
+        name="${name%.session}"
+        valid_session_name "$name" || continue
+        session_exists "$name" && continue
+        if IFS=$'\t' read -r agent working_dir < <(read_state "$file"); then
+            if create_named_session "$name" "$agent" "$working_dir" 1; then
+                restored=$((restored + 1))
+                restored_names+=("$name")
+            fi
+        fi
+    done
+    if (( restored > 0 )); then
+        write_tab_queue "${restored_names[@]}"
+    fi
+    [[ -e "$SHUTDOWN_MARKER" ]] && unlink "$SHUTDOWN_MARKER"
+    printf 'restored=%s\n' "$restored"
+}
+
+attach_session() {
+    local name="${1:?session required}"
+    session_exists "$name" || {
+        printf 'Managed session no longer exists: %s\n' "$name" >&2
+        return 1
+    }
+    "${TMUX[@]}" source-file "$TMUX_CONFIG"
+    exec "${TMUX[@]}" attach-session -d -t "$name"
+}
+
+popout_session() {
+    local name="${1:-}"
+    local working_dir
+    if [[ -z "$name" && -n "${TMUX_PANE:-}" ]]; then
+        name="$("${TMUX[@]}" display-message -p '#S')"
+    fi
+    session_exists "$name" || {
+        printf 'Managed session no longer exists: %s\n' "$name" >&2
+        return 1
+    }
+    working_dir="$("${TMUX[@]}" display-message -p -t "$name" '#{pane_current_path}')"
+    [[ -d "$working_dir" ]] || working_dir="$HOME"
+    /usr/bin/konsole --separate --profile HyperTerminal --workdir "$working_dir" \
+        --hide-menubar -e "$SELF" external-attach "$name" >/dev/null 2>&1 &
+}
+
+focus_external() {
+    local service="${1:?service required}"
+    local window_id="${2:?window required}"
+    local session_id="${3:?session required}"
+    local visible
+    [[ "$service" =~ ^org\.kde\.konsole-[0-9]+$ ]] || return 64
+    [[ "$window_id" =~ ^[0-9]+$ && "$session_id" =~ ^[0-9]+$ ]] || return 64
+
+    qdbus6 "$service" "/Windows/$window_id" org.kde.konsole.Window.setCurrentSession "$session_id" >/dev/null
+    qdbus6 "$service" "/konsole/MainWindow_$window_id" org.qtproject.Qt.QWidget.show >/dev/null 2>&1 || true
+    qdbus6 "$service" "/konsole/MainWindow_$window_id" org.qtproject.Qt.QWidget.raise >/dev/null 2>&1 || true
+    qdbus6 "$service" "/konsole/MainWindow_$window_id" org.qtproject.Qt.QWidget.setFocus >/dev/null 2>&1 || true
+
+    visible="$(qdbus6 org.kde.yakuake /yakuake/MainWindow_1 org.freedesktop.DBus.Properties.Get org.qtproject.Qt.QWidget visible 2>/dev/null || true)"
+    if [[ "$visible" == true ]]; then
+        qdbus6 org.kde.yakuake /yakuake/window org.kde.yakuake.toggleWindowState >/dev/null 2>&1 || true
+    fi
+}
+
+list_sessions() {
+    local name attached agent windows current
+    while IFS=$'\t' read -r name attached agent windows; do
+        [[ -n "$name" ]] || continue
+        current="$("${TMUX[@]}" display-message -p -t "$name" '#{pane_current_command}' 2>/dev/null || printf unknown)"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$attached" "$agent" "$windows" "$current"
+    done < <("${TMUX[@]}" list-sessions \
+        -F $'#{session_name}\t#{session_attached}\t#{@hyperterminal_agent}\t#{session_windows}' \
+        2>/dev/null || true)
+}
+
+case "${1:-}" in
+    create)
+        create_session "${2:-}" "${3:-$PWD}"
+        ;;
+    new)
+        name="$(create_session "${2:-}" "${3:-$PWD}")"
+        attach_session "$name"
+        ;;
+    attach|external-attach)
+        attach_session "${2:-}"
+        ;;
+    popout)
+        popout_session "${2:-}"
+        ;;
+    focus-external)
+        focus_external "${2:-}" "${3:-}" "${4:-}"
+        ;;
+    forget)
+        forget_session "${2:-}"
+        ;;
+    snapshot)
+        snapshot_sessions
+        ;;
+    prepare-shutdown)
+        prepare_shutdown
+        ;;
+    restore)
+        restore_sessions
+        ;;
+    queue-detached-tabs)
+        queue_detached_tabs
+        ;;
+    claim-tab)
+        claim_tab
+        ;;
+    queue-count)
+        tab_queue_count
+        ;;
+    list)
+        list_sessions
+        ;;
+    *)
+        printf 'usage: %s {create|new|attach|popout|focus-external|forget|snapshot|prepare-shutdown|restore|queue-detached-tabs|claim-tab|queue-count|list} ...\n' "${0##*/}" >&2
+        exit 64
+        ;;
+esac

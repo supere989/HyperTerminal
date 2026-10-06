@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=HyperTerminal
+Comment=Start HyperTerminal hidden and ready
+Exec=@BIN_DIR@/hyperterminal-start
+Icon=hyperterminal
+Terminal=false
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+X-KDE-StartupNotify=false

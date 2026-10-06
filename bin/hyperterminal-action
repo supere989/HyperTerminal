@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly ACTION="${1:-}"
+
+notify() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name="HyperTerminal" --icon=utilities-terminal "$@"
+    fi
+}
+
+paste_image() {
+    local mime=""
+    local extension=""
+    local types
+    types="$(wl-paste --list-types 2>/dev/null || true)"
+
+    while IFS='|' read -r candidate suffix; do
+        if grep -Fqx "$candidate" <<<"$types"; then
+            mime="$candidate"
+            extension="$suffix"
+            break
+        fi
+    done <<'EOF'
+image/png|png
+image/jpeg|jpg
+image/webp|webp
+image/gif|gif
+image/tiff|tiff
+image/bmp|bmp
+image/svg+xml|svg
+EOF
+
+    if [[ -z "$mime" ]]; then
+        notify "No clipboard image" "Text still pastes normally with Ctrl+Shift+V."
+        return 0
+    fi
+
+    local image_dir image_path quoted_path
+    image_dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/HyperTerminal Clipboard"
+    mkdir -p -- "$image_dir"
+    umask 077
+    image_path="$(mktemp --tmpdir="$image_dir" "clipboard-$(date +%Y%m%d-%H%M%S)-XXXXXX.$extension")"
+
+    if ! wl-paste --no-newline --type "$mime" >"$image_path"; then
+        rm -f -- "$image_path"
+        notify "Image paste failed" "The clipboard image could not be saved."
+        return 1
+    fi
+
+    printf -v quoted_path '%q' "$image_path"
+    printf '%s' "$quoted_path" | wl-copy --type text/plain
+    notify "Image path ready" "Saved and copied. Press Ctrl+Shift+V in the console."
+}
+
+self_test() {
+    local missing=0
+    local command_name
+    for command_name in wl-copy wl-paste; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            printf 'missing: %s\n' "$command_name" >&2
+            missing=1
+        fi
+    done
+    [[ "$missing" -eq 0 ]] || return 1
+    printf 'hyperterminal-action: ok\n'
+}
+
+case "$ACTION" in
+    paste-image)
+        paste_image
+        ;;
+    --self-test)
+        self_test
+        ;;
+    *)
+        printf 'usage: %s {paste-image|--self-test}\n' "${0##*/}" >&2
+        exit 64
+        ;;
+esac

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=HyperTerminal
+GenericName=Drop-down Terminal
+Comment=Persistent AI-agent terminal for KDE Plasma
+Exec=@BIN_DIR@/hyperterminal-start
+TryExec=yakuake
+Icon=hyperterminal
+Type=Application
+Terminal=false
+Categories=Qt;KDE;System;TerminalEmulator;
+StartupNotify=false

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+session_tool="$HOME/.local/bin/hyperterminal-session"
+
+"$session_tool" restore >/dev/null 2>&1 || true
+if [[ "$("$session_tool" queue-count 2>/dev/null || printf 0)" -eq 0 ]]; then
+    "$session_tool" queue-detached-tabs >/dev/null 2>&1 || true
+fi
+tab_count="$("$session_tool" queue-count 2>/dev/null || printf 0)"
+[[ "$tab_count" =~ ^[0-9]+$ ]] || tab_count=0
+
+/usr/bin/yakuake &
+yakuake_pid=$!
+
+for _ in {1..50}; do
+    if qdbus6 org.kde.yakuake /yakuake/sessions org.kde.yakuake.sessionIdList >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+qdbus6 org.kde.yakuake /yakuake/MainWindow_1 \
+    org.qtproject.Qt.QWidget.setWindowTitle HyperTerminal >/dev/null 2>&1 || true
+
+for ((tab=1; tab<tab_count; tab++)); do
+    qdbus6 org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession >/dev/null 2>&1 || break
+done
+
+wait "$yakuake_pid"

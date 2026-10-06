@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+run_agent() {
+    case "$1" in
+        codex)
+            shift
+            exec codex --dangerously-bypass-approvals-and-sandbox "$@"
+            ;;
+        claude)
+            shift
+            exec claude --dangerously-skip-permissions "$@"
+            ;;
+        grok)
+            shift
+            exec grok --always-approve "$@"
+            ;;
+        kimi)
+            shift
+            exec kimi --auto "$@"
+            ;;
+        agy)
+            shift
+            exec agy --dangerously-skip-permissions "$@"
+            ;;
+        *)
+            printf 'unknown agent: %s\n' "$1" >&2
+            exit 64
+            ;;
+    esac
+}
+
+if [[ "$#" -gt 0 ]]; then
+    run_agent "$@"
+fi
+
+choice="$(printf '%s\n' \
+    'codex   OpenAI Codex · POWER default' \
+    'claude  Claude Code · POWER default' \
+    'grok    Grok CLI · POWER default' \
+    'kimi    Kimi Code · POWER default' \
+    'agy     Agy · POWER default' |
+    fzf --height=~40% --layout=reverse --border=rounded \
+        --prompt='HyperTerminal > ' --header='HyperTerminal · Choose a TUI agent')" || exit 0
+
+run_agent "${choice%% *}"

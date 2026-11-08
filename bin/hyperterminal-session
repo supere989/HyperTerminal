@@ -13,7 +13,8 @@ readonly TAB_QUEUE_LOCK="$STATE_ROOT/tab-restore.lock"
 readonly -a TMUX=(/usr/bin/tmux -L "$SOCKET_NAME" -f "$TMUX_CONFIG")
 
 valid_agent() {
-    "$HOME/.local/bin/hyperterminal-catalog" known "$1"
+    # Reject option-like names so the catalog's argparse help never counts as "known".
+    [[ "$1" != -* ]] && "$HOME/.local/bin/hyperterminal-catalog" known "$1"
 }
 
 agent_available() {
@@ -329,6 +330,38 @@ list_saved_sessions() {
     done
 }
 
+# Every record, newest first, with a running flag; Dolphin opens match folders against this.
+list_records() {
+    local file name agent directory conversation running
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        name="${file##*/}"; name="${name%.session}"
+        valid_session_name "$name" || continue
+        running=0
+        session_exists "$name" && running=1
+        if IFS=$'\t' read -r agent directory conversation < <(read_state "$file"); then
+            printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$running" "$agent" "$directory" "$conversation"
+        fi
+    done < <(ls -1t "$SESSION_STATE_DIR"/*.session 2>/dev/null || true)
+}
+
+# Put a running session at the head of the tab queue so the next new tab attaches it.
+queue_tab() {
+    local name="${1:?session required}" temp_file
+    valid_session_name "$name" || return 64
+    session_exists "$name" || return 1
+    ensure_state_dir
+    exec 9>"$TAB_QUEUE_LOCK"
+    flock 9
+    temp_file="$(mktemp "$STATE_ROOT/.tab-restore.XXXXXX")"
+    chmod 600 "$temp_file"
+    printf '%s\n' "$name" >"$temp_file"
+    if [[ -f "$TAB_QUEUE" ]]; then
+        grep -Fxv -- "$name" "$TAB_QUEUE" >>"$temp_file" || true
+    fi
+    mv -f -- "$temp_file" "$TAB_QUEUE"
+}
+
 resume_saved_session() {
     local name="${1:?session required}" agent directory conversation
     valid_session_name "$name" || return 64
@@ -365,6 +398,12 @@ case "${1:-}" in
         ;;
     list-saved)
         list_saved_sessions
+        ;;
+    list-records)
+        list_records
+        ;;
+    queue-tab)
+        queue_tab "${2:-}"
         ;;
     resume-saved)
         resume_saved_session "${2:-}"
@@ -410,7 +449,7 @@ case "${1:-}" in
         list_sessions
         ;;
     *)
-        printf 'usage: %s {create|list-saved|resume-saved|resume-conversation|new|attach|popout|focus-external|forget|snapshot|prepare-shutdown|restore|queue-detached-tabs|claim-tab|queue-count|list} ...\n' "${0##*/}" >&2
+        printf 'usage: %s {create|list-saved|list-records|queue-tab|resume-saved|resume-conversation|new|attach|popout|focus-external|forget|snapshot|prepare-shutdown|restore|queue-detached-tabs|claim-tab|queue-count|list} ...\n' "${0##*/}" >&2
         exit 64
         ;;
 esac

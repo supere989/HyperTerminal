@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# Open or restore a managed agent session for a folder chosen in Dolphin.
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+readonly SESSION_TOOL="$HOME/.local/bin/hyperterminal-session"
+readonly CATALOG="$HOME/.local/bin/hyperterminal-catalog"
+readonly STATE_ROOT="${HYPERTERMINAL_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/hyperterminal}"
+readonly LEDGER="$STATE_ROOT/open.ledger"
+readonly LEDGER_LOCK="$STATE_ROOT/open.lock"
+readonly REGISTRY="${HYPERTERMINAL_PROJECT_REGISTRY:-$HOME/.claude/projects.json}"
+# Test hooks: DECISION skips the parent dialog (parent|self|cancel); PRESENT=none skips Yakuake/Konsole.
+readonly DECISION_OVERRIDE="${HYPERTERMINAL_OPEN_DECISION:-}"
+readonly PRESENT_OVERRIDE="${HYPERTERMINAL_OPEN_PRESENT:-}"
+
+usage() {
+    printf 'usage: %s {AGENT DIRECTORY | --plan AGENT DIRECTORY | --stats}\n' "${0##*/}" >&2
+    printf 'AGENT: ansr-claude-power codex-power agy-power grok-power kimi-power or a catalog agent name\n' >&2
+    exit 64
+}
+
+# Dolphin menu labels map onto catalog adapters; bare adapter names also work.
+agent_for_label() {
+    case "$1" in
+        ansr-claude-power|claude-power) printf claude ;;
+        codex-power) printf codex ;;
+        agy-power) printf agy ;;
+        grok-power) printf grok ;;
+        kimi-power) printf kimi ;;
+        opencode-power) printf opencode ;;
+        -*) return 1 ;;
+        *) "$CATALOG" known "$1" && printf '%s' "$1" ;;
+    esac
+}
+
+# SAI ledger: one row per invocation, including cancels and failures.
+ledger() {
+    local agent="$1" requested="$2" chosen="$3" decision="$4" route="$5" session="$6" outcome="$7"
+    mkdir -p "$STATE_ROOT"
+    chmod 700 "$STATE_ROOT"
+    {
+        flock 8
+        [[ -e "$LEDGER" ]] || { : >"$LEDGER"; chmod 600 "$LEDGER"; }
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date --iso-8601=seconds)" "$agent" "$requested" "$chosen" \
+            "$decision" "$route" "$session" "$outcome" | tr -d '\r' >>"$LEDGER"
+    } 8>"$LEDGER_LOCK"
+}
+
+stats() {
+    if [[ ! -s "$LEDGER" ]]; then
+        printf 'opens=0\n'
+        return 0
+    fi
+    awk -F'\t' '
+        { total++; route[$6]++; decision[$5]++; outcome[$8]++; agent[$2]++ }
+        END {
+            printf "opens=%d\n", total
+            for (k in agent) printf "agent.%s=%d\n", k, agent[k]
+            for (k in decision) printf "decision.%s=%d\n", k, decision[k]
+            for (k in route) printf "route.%s=%d\n", k, route[k]
+            for (k in outcome) printf "outcome.%s=%d\n", k, outcome[k]
+        }' "$LEDGER" | sort
+}
+
+notify_error() {
+    if [[ -z "$DECISION_OVERRIDE" ]] && command -v kdialog >/dev/null 2>&1; then
+        kdialog --title HyperTerminal --error "$1" >/dev/null 2>&1 || true
+    fi
+    printf 'HyperTerminal: %s\n' "$1" >&2
+}
+
+# Registry project paths (one per line) from the project map, when present.
+registry_paths() {
+    [[ -f "$REGISTRY" ]] || return 0
+    python3 -I - "$REGISTRY" <<'PY' 2>/dev/null || true
+import json, os, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(0)
+for entry in data if isinstance(data, list) else []:
+    path = entry.get('path') if isinstance(entry, dict) else None
+    if isinstance(path, str) and path.startswith('/'):
+        print(os.path.realpath(path))
+PY
+}
+
+# Records: name running agent directory conversation (newest first).
+records_for_agent() {
+    local name running agent directory conversation
+    while IFS=$'\t' read -r name running agent directory conversation; do
+        [[ -n "$name" && "$agent" == "$1" ]] || continue
+        [[ -d "$directory" ]] || continue
+        printf '%s\t%s\t%s\t%s\n' "$name" "$running" "$(realpath -e -- "$directory")" "$conversation"
+    done < <("$SESSION_TOOL" list-records 2>/dev/null || true)
+}
+
+# Why a directory counts as a project root: git, registry, or an agent record. Empty when it is not one.
+project_reason() {
+    local directory="$1" agent="$2" registry="$3" records="$4"
+    [[ -e "$directory/.git" ]] && { printf git; return 0; }
+    grep -Fxq -- "$directory" <<<"$registry" && { printf registry; return 0; }
+    awk -F'\t' -v d="$directory" '$3 == d { found=1; exit } END { exit !found }' <<<"$records" && { printf session; return 0; }
+    return 1
+}
+
+# Nearest strict ancestor that is a project root, stopping below HOME and /.
+find_parent() {
+    local directory="$1" agent="$2" registry="$3" records="$4" home candidate reason
+    home="$(realpath -e -- "$HOME")"
+    candidate="$directory"
+    while :; do
+        candidate="${candidate%/*}"
+        [[ -n "$candidate" && "$candidate" != "$home" ]] || return 1
+        if reason="$(project_reason "$candidate" "$agent" "$registry" "$records")"; then
+            printf '%s\t%s\n' "$candidate" "$reason"
+            return 0
+        fi
+    done
+}
+
+# Newest native conversation whose project directory is this folder.
+history_conversation() {
+    local agent="$1" directory="$2" rows
+    rows="$("$CATALOG" history "$agent" 2>/dev/null || true)"
+    HYPERTERMINAL_HISTORY_JSON="$rows" python3 -I - "$directory" <<'PY' 2>/dev/null || true
+import json, os, sys
+try:
+    rows = json.loads(os.environ.get('HYPERTERMINAL_HISTORY_JSON') or '[]')
+except ValueError:
+    sys.exit(0)
+target = sys.argv[1]
+for row in rows:
+    if os.path.realpath(row.get('directory', '')) == target:
+        print(row['id'])
+        break
+PY
+}
+
+# Route: running NAME | history ID | saved NAME | new
+route_for() {
+    local agent="$1" directory="$2" records="$3" name running record_dir conversation
+    while IFS=$'\t' read -r name running record_dir conversation; do
+        [[ -n "$name" && "$running" == 1 && "$record_dir" == "$directory" ]] || continue
+        printf 'running\t%s\n' "$name"; return 0
+    done <<<"$records"
+    conversation="$(history_conversation "$agent" "$directory")"
+    if [[ -n "$conversation" ]]; then
+        printf 'history\t%s\n' "$conversation"; return 0
+    fi
+    while IFS=$'\t' read -r name running record_dir conversation; do
+        [[ -n "$name" && "$running" == 0 && "$record_dir" == "$directory" ]] || continue
+        printf 'saved\t%s\n' "$name"; return 0
+    done <<<"$records"
+    printf 'new\t-\n'
+}
+
+plan() {
+    local label="$1" requested="$2" agent directory registry records parent parent_dir parent_reason route target
+    agent="$(agent_for_label "$label")" || { printf 'Unknown agent: %s\n' "$label" >&2; return 64; }
+    directory="$(realpath -e -- "$requested" 2>/dev/null)" && [[ -d "$directory" ]] || { printf 'Not a directory: %s\n' "$requested" >&2; return 66; }
+    registry="$(registry_paths)"
+    records="$(records_for_agent "$agent")"
+    printf 'agent=%s\ndirectory=%s\n' "$agent" "$directory"
+    if ! project_reason "$directory" "$agent" "$registry" "$records" >/dev/null \
+        && parent="$(find_parent "$directory" "$agent" "$registry" "$records")"; then
+        IFS=$'\t' read -r parent_dir parent_reason <<<"$parent"
+        printf 'parent=%s\nparent_reason=%s\n' "$parent_dir" "$parent_reason"
+        IFS=$'\t' read -r route target <<<"$(route_for "$agent" "$parent_dir" "$records")"
+        printf 'parent_route=%s\nparent_target=%s\n' "$route" "$target"
+    else
+        printf 'parent=-\nparent_reason=-\n'
+    fi
+    IFS=$'\t' read -r route target <<<"$(route_for "$agent" "$directory" "$records")"
+    printf 'route=%s\ntarget=%s\n' "$route" "$target"
+}
+
+ask_parent() {
+    local directory="$1" parent="$2" reason="$3" route="$4"
+    if [[ -n "$DECISION_OVERRIDE" ]]; then printf '%s' "$DECISION_OVERRIDE"; return 0; fi
+    command -v kdialog >/dev/null 2>&1 || { printf self; return 0; }
+    local text
+    printf -v text '%s\nis inside the project folder\n%s\n(detected by %s; parent session: %s).\n\nOpen the agent in the parent project instead?' \
+        "$directory" "$parent" "$reason" "$route"
+    local status=0
+    kdialog --title HyperTerminal --icon hyperterminal --yesnocancel "$text" \
+        --yes-label 'Open parent project' --no-label 'Open this folder' --cancel-label Cancel >/dev/null 2>&1 || status=$?
+    case "$status" in 0) printf parent ;; 1) printf self ;; *) printf cancel ;; esac
+}
+
+present() {
+    local name="$1" session_id visible
+    [[ "$PRESENT_OVERRIDE" != none ]] || { printf none; return 0; }
+    if qdbus6 org.kde.yakuake /yakuake/sessions org.kde.yakuake.sessionIdList >/dev/null 2>&1; then
+        "$SESSION_TOOL" queue-tab "$name"
+        session_id="$(qdbus6 org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession)"
+        [[ "$session_id" =~ ^[0-9]+$ ]] && qdbus6 org.kde.yakuake /yakuake/sessions org.kde.yakuake.raiseSession "$session_id" >/dev/null 2>&1 || true
+        visible="$(qdbus6 org.kde.yakuake /yakuake/MainWindow_1 org.freedesktop.DBus.Properties.Get org.qtproject.Qt.QWidget visible 2>/dev/null || true)"
+        [[ "$visible" == true ]] || qdbus6 org.kde.yakuake /yakuake/window org.kde.yakuake.toggleWindowState >/dev/null 2>&1 || true
+        printf yakuake
+    else
+        "$SESSION_TOOL" popout "$name"
+        printf konsole
+    fi
+}
+
+open_session() {
+    local label="$1" requested="$2" line key value name=""
+    local agent="" directory="" parent="-" parent_reason="-" parent_route="-" route="" target="" decision=none chosen
+    local -a plan_lines=()
+    mapfile -t plan_lines < <(plan "$label" "$requested" 2>/dev/null || true)
+    for line in "${plan_lines[@]}"; do
+        key="${line%%=*}"; value="${line#*=}"
+        case "$key" in
+            agent) agent="$value" ;; directory) directory="$value" ;;
+            parent) parent="$value" ;; parent_reason) parent_reason="$value" ;;
+            parent_route) parent_route="$value" ;; route) route="$value" ;; target) target="$value" ;;
+        esac
+    done
+    if [[ -z "$agent" || -z "$directory" || -z "$route" ]]; then
+        ledger "${agent:-$label}" "$requested" - none - - error:plan
+        notify_error "Cannot open ${label} in ${requested}: not a readable directory or unknown agent."
+        return 1
+    fi
+    if ! "$CATALOG" resolve "$agent" >/dev/null; then
+        ledger "$agent" "$directory" - none - - error:agent-missing
+        notify_error "$agent is not installed; nothing was started."
+        return 1
+    fi
+    chosen="$directory"
+    if [[ "$parent" != - ]]; then
+        decision="$(ask_parent "$directory" "$parent" "$parent_reason" "$parent_route")"
+        case "$decision" in
+            parent)
+                chosen="$parent"
+                IFS=$'\t' read -r route target <<<"$(route_for "$agent" "$chosen" "$(records_for_agent "$agent")")"
+                ;;
+            self) ;;
+            *)
+                ledger "$agent" "$directory" - cancel - - cancelled
+                return 0
+                ;;
+        esac
+    fi
+    case "$route" in
+        running) name="$target" ;;
+        history) name="$("$SESSION_TOOL" resume-conversation "$agent" "$target" "$chosen")" || name="" ;;
+        saved) name="$("$SESSION_TOOL" resume-saved "$target")" || name="" ;;
+        new) name="$("$SESSION_TOOL" create "$agent" "$chosen")" || name="" ;;
+    esac
+    if [[ -z "$name" ]]; then
+        ledger "$agent" "$directory" "$chosen" "$decision" "$route" - error:session
+        notify_error "Could not start or restore the $agent session for $chosen."
+        return 1
+    fi
+    local outcome
+    if outcome="$(present "$name")"; then
+        ledger "$agent" "$directory" "$chosen" "$decision" "$route" "$name" "$outcome"
+        printf '%s\n' "$name"
+    else
+        ledger "$agent" "$directory" "$chosen" "$decision" "$route" "$name" error:present
+        notify_error "Session $name is running but could not be shown in HyperTerminal."
+        return 1
+    fi
+}
+
+case "${1:-}" in
+    --plan) [[ $# -eq 3 ]] || usage; plan "$2" "$3" ;;
+    --stats) stats ;;
+    ''|-*) usage ;;
+    *) [[ $# -eq 2 ]] || usage; open_session "$1" "$2" ;;
+esac

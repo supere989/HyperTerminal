@@ -1,4 +1,12 @@
 # Changelog
+## 0.4.0
+- Add a Dolphin "Activities" folder submenu with ansr-claude, Codex, Agy, Grok, and Kimi power entries.
+- Open a folder's running session, exact native conversation, dormant record, or a new session, in that order.
+- Recommend the enclosing project (git, project registry, or existing session) before opening a child folder.
+- Attach opened sessions in a new HyperTerminal tab, or in Konsole when Yakuake is not running.
+- Ledger every open, cancel, and failure; summarise with `hyperterminal-open --stats`.
+- Add `list-records` and `queue-tab` session commands and the `hyperterminal open` binary command.
+- Reject option-like agent names so `--help` never creates a session record.
 
 ## 0.3.0
 

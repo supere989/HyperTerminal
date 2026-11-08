@@ -14,6 +14,7 @@ console and standalone windows without restarting them.
 - Move running tmux sessions between windows; focus existing external Konsole sessions.
 - Restore saved sessions after reboot using each agent's native continuation option.
 - Save Wayland clipboard images and copy a shell-quoted path for agent prompts.
+- Dolphin right-click "Activities" submenu: open or restore an agent session for any folder.
 - User-level installer with dated backups; no root installation required.
 
 ## Requirements
@@ -76,6 +77,7 @@ hyperterminal agents history    # local conversation metadata
 hyperterminal sessions list     # running managed sessions
 hyperterminal selector          # interactive agent/session selector
 hyperterminal clipboard         # save clipboard image and copy its path
+hyperterminal open codex-power ~/projects/x   # what the Dolphin menu runs
 ```
 
 ## Install from source
@@ -154,6 +156,47 @@ hyperterminal-tab --list               # selector rows without launching an agen
 hyperterminal-session list-saved       # saved sessions which are not currently running
 ```
 
+## Dolphin folder menu
+
+Right-click a folder (or the background of an open folder) in Dolphin and open
+the **Activities** submenu. It lists `ansr-claude-power`, `codex-power`,
+`agy-power`, `grok-power`, and `kimi-power`. Each entry runs
+`hyperterminal-open LABEL FOLDER`, which decides what to do in this order:
+
+1. **Running managed session** recorded in that folder for that agent: reuse it.
+2. **Native conversation** whose project directory is that folder (Codex, Claude,
+   Grok, Kimi, OpenCode history): resume it by exact ID.
+3. **Dormant HyperTerminal record** for that folder: restore it.
+4. Otherwise **start a new power session** in the folder.
+
+Agy keeps no readable history, so for Agy only HyperTerminal's own records count.
+
+Before choosing, the opener looks upward for a **parent project**: the nearest
+ancestor (below your home directory) that holds a `.git` entry, is listed in
+`~/.claude/projects.json`, or already has a HyperTerminal session for that agent.
+If the clicked folder is itself a project root by the same test, there is no
+prompt. Otherwise a kdialog asks whether to open the parent project or the
+clicked folder; Cancel starts nothing. The session is then attached in a new
+HyperTerminal tab (Yakuake is shown if hidden) or, when Yakuake is not running,
+in a standalone Konsole window.
+
+Plasma's own file-item plugin also contributes an "Activities" submenu for
+linking files to Plasma Activities, so Dolphin may show two submenus with that
+label. Change the `X-KDE-Submenu` line in
+`desktop/hyperterminal-activities.desktop.in` to rename HyperTerminal's.
+KDE Frameworks 6 only loads user service menus that are executable; the installer
+sets that bit on `~/.local/share/kio/servicemenus/hyperterminal-activities.desktop`.
+
+Every invocation, including cancels and failures, appends one row to
+`~/.local/state/hyperterminal/open.ledger` (time, agent, clicked folder, chosen
+folder, parent decision, route, session, outcome). Diagnostics:
+
+```bash
+hyperterminal-open --plan codex-power ~/projects/x/src   # decisions without opening anything
+hyperterminal-open --stats                                # counts by agent, decision, route, outcome
+hyperterminal-session list-records                        # every record with a running flag
+```
+
 ## Agent permissions and restoration
 
 **Agent launches use power mode by default.** The launchers pass permission
@@ -181,13 +224,15 @@ rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 python3 tests/verify.py
 python3 tests/detection.py
+python3 tests/open.py
 python3 tests/binary.py
 ```
 
 Checks cover Bash syntax, asset parsing, isolated installer backup/restore,
 and actual tmux shell-session creation, snapshot, restoration, tab queue,
 and cleanup. Agent checks cover discovery, exact resume arguments, reattachment,
-missing-agent recovery, and legacy records. Desktop appearance and agent CLI compatibility require a real
+missing-agent recovery, and legacy records. Folder-opener checks cover the
+rendered service menu, parent detection, route order, headless opens, and the ledger. Desktop appearance and agent CLI compatibility require a real
 Plasma session with the relevant dependencies.
 
 Project layout: `src/` Rust bootstrap; `build.rs` embedded runtime bundle; `bin/` launchers; `assets/` theme/profile; `config/` integration;

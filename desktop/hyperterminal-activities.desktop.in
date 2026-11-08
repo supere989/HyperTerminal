@@ -1,0 +1,38 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=inode/directory;
+X-KDE-Priority=TopLevel
+X-KDE-Submenu=Activities
+X-KDE-AuthorizeAction=shell_access
+Actions=ansrClaudePower;codexPower;agyPower;grokPower;kimiPower;
+
+[Desktop Action ansrClaudePower]
+Name=ansr-claude-power
+Comment=Open or restore a Claude power session in this folder
+Icon=hyperterminal
+Exec=@BIN_DIR@/hyperterminal-open ansr-claude-power %f
+
+[Desktop Action codexPower]
+Name=codex-power
+Comment=Open or restore a Codex power session in this folder
+Icon=hyperterminal
+Exec=@BIN_DIR@/hyperterminal-open codex-power %f
+
+[Desktop Action agyPower]
+Name=agy-power
+Comment=Open or restore an Agy power session in this folder
+Icon=hyperterminal
+Exec=@BIN_DIR@/hyperterminal-open agy-power %f
+
+[Desktop Action grokPower]
+Name=grok-power
+Comment=Open or restore a Grok power session in this folder
+Icon=hyperterminal
+Exec=@BIN_DIR@/hyperterminal-open grok-power %f
+
+[Desktop Action kimiPower]
+Name=kimi-power
+Comment=Open or restore a Kimi power session in this folder
+Icon=hyperterminal
+Exec=@BIN_DIR@/hyperterminal-open kimi-power %f

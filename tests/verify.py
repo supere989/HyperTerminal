@@ -28,6 +28,8 @@ with tempfile.TemporaryDirectory(prefix='hyperterminal-test-') as temp:
     run(['python3',str(ROOT/'install.py'),'--no-activate'],env)
     assert 'Preserve=yes' in original.read_text()
     assert '@BIN_DIR@' not in (home/'.local/share/konsole/HyperTerminal.profile').read_text()
+    menu=home/'.local/share/kio/servicemenus/hyperterminal-activities.desktop'
+    assert os.access(menu,os.X_OK) and '@BIN_DIR@' not in menu.read_text() and menu.read_text().count('[Desktop Action ')==5
     backup=next((home/'.local/share/hyperterminal/backups').iterdir())
     assert (backup/'.config/yakuakerc').read_text()=='[Unrelated]\nPreserve=yes\n'
     tool=home/'.local/bin/hyperterminal-session'
@@ -58,6 +60,7 @@ with tempfile.TemporaryDirectory(prefix='hyperterminal-test-') as temp:
         run([str(tool),'forget',name],env)
         assert not state.exists()
         assert subprocess.run([str(tool),'create','invalid'],env=env,capture_output=True).returncode!=0
+        assert subprocess.run([str(tool),'create','--help'],env=env,capture_output=True).returncode!=0
     finally:
         subprocess.run(tmux+['kill-server'],env=env,capture_output=True)
     run(['python3',str(ROOT/'restore-install.py'),str(backup)],env)

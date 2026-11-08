@@ -74,7 +74,7 @@ fn deploy(no_activate: bool) -> Result<(), String> {
     Ok(())
 }
 fn usage() {
-    println!("HyperTerminal {}\n\nUsage: hyperterminal [COMMAND]\n\n  start                 Check dependencies and open HyperTerminal (default)\n  install [--no-activate] Check dependencies and deploy embedded desktop files\n  doctor / --check       Report dependencies without changing anything\n  agents [list|history]  Detect installed agents or list previous conversations\n  sessions COMMAND      Manage persistent sessions (list, list-saved, create, ...)\n  selector              Open the agent/session selector\n  clipboard             Save clipboard image and copy its path\n  --version             Print binary version\n\nMissing dependencies are installed only after explicit confirmation.\nThis binary embeds the current Bash/Python runtime and SVG assets;\nYakuake, Konsole, tmux, system interpreters, and coding agents remain external.",env!("CARGO_PKG_VERSION"));
+    println!("HyperTerminal {}\n\nUsage: hyperterminal [COMMAND]\n\n  start                 Check dependencies and open HyperTerminal (default)\n  install [--no-activate] Check dependencies and deploy embedded desktop files\n  doctor / --check       Report dependencies without changing anything\n  agents [list|history]  Detect installed agents or list previous conversations\n  sessions COMMAND      Manage persistent sessions (list, list-saved, create, ...)\n  selector              Open the agent/session selector\n  open AGENT DIRECTORY  Open or restore an agent session for a folder (Dolphin menu)\n  clipboard             Save clipboard image and copy its path\n  --version             Print binary version\n\nMissing dependencies are installed only after explicit confirmation.\nThis binary embeds the current Bash/Python runtime and SVG assets;\nYakuake, Konsole, tmux, system interpreters, and coding agents remain external.",env!("CARGO_PKG_VERSION"));
 }
 fn main_result() -> Result<i32, String> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -92,7 +92,7 @@ fn main_result() -> Result<i32, String> {
         "install" if args.iter().skip(1).any(|arg| arg != "--no-activate") => {
             return Err("Usage: hyperterminal install [--no-activate]".into())
         }
-        "start" | "install" | "agents" | "sessions" | "selector" | "clipboard" => {}
+        "start" | "install" | "agents" | "sessions" | "selector" | "clipboard" | "open" => {}
         _ => return Err(format!("Unknown command: {action}. Use --help.")),
     }
     // Consent and successful dependency verification precede any runtime extraction.
@@ -128,6 +128,7 @@ fn main_result() -> Result<i32, String> {
         ),
         "selector" => ("hyperterminal-tab", args[1..].to_vec()),
         "clipboard" => ("hyperterminal-action", vec!["paste-image".into()]),
+        "open" => ("hyperterminal-open", args[1..].to_vec()),
         _ => unreachable!(),
     };
     // Include installed compatibility helpers without discarding the user's PATH.
@@ -162,6 +163,8 @@ mod tests {
             "README.md",
             "bin/hyperterminal-catalog",
             "bin/hyperterminal-session",
+            "bin/hyperterminal-open",
+            "desktop/hyperterminal-activities.desktop.in",
             "assets/skin/icon.svg",
         ] {
             assert!(FILES.iter().any(|(name, _)| *name == required));

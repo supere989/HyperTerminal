@@ -74,6 +74,8 @@ def main():
     files[share/'applications/org.kde.yakuake.desktop'] = (render(ROOT/'desktop/org.kde.yakuake.desktop.in'),0o644)
     files[share/'applications/hyperterminal-paste-image.desktop'] = (render(ROOT/'desktop/hyperterminal-paste-image.desktop.in'),0o644)
     files[config/'autostart/org.kde.yakuake.desktop'] = (render(ROOT/'desktop/hyperterminal-autostart.desktop.in'),0o644)
+    # KDE Frameworks 6 only loads user service menus that are executable.
+    files[share/'kio/servicemenus/hyperterminal-activities.desktop'] = (render(ROOT/'desktop/hyperterminal-activities.desktop.in'),0o755)
     files[config/'systemd/user/hyperterminal-session-persistence.service'] = ((ROOT/'systemd/hyperterminal-session-persistence.service').read_bytes(),0o644)
     files[share/'hyperterminal/README.md'] = ((ROOT/'README.md').read_bytes(),0o644)
     if binary_source:

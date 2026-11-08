@@ -10,6 +10,7 @@ import tempfile
 import time
 
 ROOT=Path(__file__).resolve().parents[1]
+VERSION=next(line.split('"')[1] for line in (ROOT/'Cargo.toml').read_text().splitlines() if line.startswith('version = '))
 BINARY=Path(os.environ.get('HYPERTERMINAL_TEST_BINARY',ROOT/'target/release/hyperterminal'))
 
 def interact(command, env, answer):
@@ -57,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='hyperterminal-binary-') as temp:
     # Fixture needs ln; no real package manager or network command can be reached.
     (tools/'ln').symlink_to(shutil.which('ln'));manager.chmod(0o755)
     version=subprocess.run([str(BINARY),'--version'],env=env,check=True,capture_output=True,text=True)
-    assert '0.3.0' in version.stdout
+    assert VERSION in version.stdout
     doctor=subprocess.run([str(BINARY),'doctor'],env=env,capture_output=True,text=True)
     assert doctor.returncode==1 and 'MISSING  fzf' in doctor.stdout
     assert not (home/'.local').exists()
